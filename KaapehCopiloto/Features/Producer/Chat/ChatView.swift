@@ -9,230 +9,299 @@ import SwiftUI
 
 struct ChatView: View {
     @Environment(\.dismiss) var dismiss
-    @State private var messages: [ChatMessage] = []
-    @State private var inputText: String = ""
-    @State private var isRecording: Bool = false
-    
-    let initialContext: String?
-    
-    init(initialContext: String? = nil) {
-        self.initialContext = initialContext
+    @StateObject private var viewModel: ChatViewModel
+    @State private var showAccessibilityChecklist = false
+
+    init(initialContext: String? = nil, viewModel: ChatViewModel? = nil) {
+        _viewModel = StateObject(wrappedValue: viewModel ?? ChatViewModel(initialContext: initialContext))
     }
-    
+
     var body: some View {
-        VStack (spacing: 0) {
-            // chat messages
+        VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 15) {
-                        ForEach(messages) { message in
-                            ChatMessageView(message: message)
-                                .id(message.id)
+                    VStack(spacing: 16) {
+                        ForEach(viewModel.messages) { message in
+                            ChatMessageView(message: message) {
+                                viewModel.retryLastInteraction()
+                            }
+                            .id(message.id)
                         }
                     }
-                    .padding()
+                    .padding(.vertical, 12)
+                    .padding(.horizontal)
                 }
-                .onChange(of: messages.count) { _, _ in
-                    if let lastMessage = messages.last {
+                .background(Color(.systemBackground))
+                .onChange(of: viewModel.messages.count) { _, _ in
+                    if let last = viewModel.messages.last {
                         withAnimation {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                            proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
                 }
             }
-            
-            // input area
-            VStack(spacing: 10) {
-                Divider()
-                
-                HStack (spacing: 12) {
-                    // voice button
+
+            if !viewModel.suggestedPrompts.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(viewModel.suggestedPrompts) { suggestion in
+                            Button(action: { viewModel.sendSuggestion(suggestion) }) {
+                                Text(suggestion.text)
+                                    .padding(.vertical, 8)
+                                    .padding(.horizontal, 12)
+                                    .background(Color(.secondarySystemBackground))
+                                    .clipShape(Capsule())
+                            }
+                            .accessibilityLabel("Sugerencia: \(suggestion.text)")
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                }
+                .background(Color(.systemGray6))
+            }
+
+            Divider()
+
+            VStack(spacing: 8) {
+                HStack(spacing: 12) {
                     Button(action: toggleRecording) {
-                        Image(systemName: isRecording ? "mic.fill" : "mic")
+                        Image(systemName: viewModel.isRecording ? "waveform" : "mic")
                             .font(.title2)
-                            .foregroundStyle(isRecording ? .red : .green)
+                            .foregroundStyle(viewModel.isRecording ? .red : (viewModel.isSpeechToTextEnabled ? .green : .gray))
                             .frame(width: 44, height: 44)
-                            .background(isRecording ? Color.red.opacity(0.1) : Color.green.opacity(0.1))
+                            .background(Color(.systemGray5))
                             .clipShape(Circle())
                     }
-                    .accessibilityLabel(isRecording ? "Detener grabación" : "Iniciar grabación")
-                    
-                    // text field
-                    TextField("Escribe tu pregunta...", text: $inputText)
+                    .disabled(!viewModel.isSpeechToTextEnabled)
+                    .accessibilityLabel(viewModel.isRecording ? String(localized: "Detener dictado") : String(localized: "Iniciar dictado"))
+
+                    TextField(String(localized: "Escribe tu pregunta..."), text: $viewModel.inputText, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Campo de texto para preguntas")
-                    
-                    // send button
-                    Button(action: sendMessage) {
-                        Image(systemName: "arrow.up.circle.fill")
+                        .lineLimit(1...4)
+                        .accessibilityLabel(String(localized: "Campo de texto para preguntas"))
+
+                    Button(action: viewModel.sendMessage) {
+                        Image(systemName: viewModel.isSending ? "paperplane" : "arrow.up.circle.fill")
                             .font(.title2)
-                            .foregroundStyle(inputText.isEmpty ? .gray : .green)
+                            .foregroundStyle(viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .gray : .green)
                     }
-                    .disabled(inputText.isEmpty)
-                    .accessibilityLabel("Enviar mensaje")
+                    .disabled(viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isSending)
+                    .accessibilityLabel(String(localized: "Enviar mensaje"))
                 }
                 .padding(.horizontal)
-                .padding(.bottom, 10)
+
+                if viewModel.isSending {
+                    ProgressView(String(localized: "Esperando respuesta del copiloto"))
+                        .progressViewStyle(.circular)
+                        .padding(.bottom, 4)
+                }
+
+                if let error = viewModel.activeError {
+                    HStack {
+                        Image(systemName: "exclamationmark.octagon.fill")
+                            .foregroundStyle(.red)
+                        Text(error.localizedDescription)
+                            .font(.footnote)
+                        Spacer()
+                        Button(String(localized: "Reintentar")) {
+                            viewModel.retryLastInteraction()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
+                    .accessibilityHint(String(localized: "Hubo un error, presiona reintentar"))
+                }
             }
+            .padding(.vertical, 10)
+            .background(Color(.systemBackground))
         }
-        .navigationTitle("Copiloto IA")
+        .navigationTitle(String(localized: "Copiloto IA"))
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            if let context = initialContext {
-                loadInitialContext(context)
-            } else {
-                loadWelcomeMessage()
-            }
+        .toolbar { toolbarContent }
+        .sheet(isPresented: $showAccessibilityChecklist) {
+            AccessibilityChecklistView(checks: viewModel.accessibilityChecks)
         }
+        .onAppear { viewModel.onAppear() }
     }
-    
-    private func loadWelcomeMessage() {
-        let welcomeMessage = ChatMessage(
-            text: "¡Hola! Soy tu Copiloto Káapeh. Puedo ayudarte a entender problemas en tus plantas y darte recomendaciones. ¿En qué puedo asistirte hoy?",
-            isFromUser: false
-        )
-        messages.append(welcomeMessage)
-    }
-    
-    private func loadInitialContext(_ context: String) {
-        let contextMessage = ChatMessage(
-            text: "He detectado: \(context). Dejame exolicarte más sobre esto...",
-            isFromUser: false
-        )
-        messages.append(contextMessage)
-        
-        // paso posterior integrar mlx aqui para generar explicacion
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            let explanation = getExplanationForIssue(context)
-            let explanationMessage = ChatMessage(text: explanation, isFromUser: false)
-            messages.append(explanationMessage)
-        }
-    }
-    
-    private func sendMessage() {
-        guard !inputText.isEmpty else { return }
-        
-        // agregar mensaje del usuario
-        let userMessage = ChatMessage(text: inputText, isFromUser: true)
-        messages.append(userMessage)
-        
-        let query = inputText
-        inputText = ""
-        
-        // integrar mlx para generar respuesta
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            let response = generateResponse(for: query)
-            let aiMessage = ChatMessage(text: response, isFromUser: false)
-            messages.append(aiMessage)
-        }
-    }
-    
+
     private func toggleRecording() {
-        isRecording.toggle()
-        
-        if isRecording {
-            // implementar speechRecognition aqui
-            print("Iniciando grabación...")
+        if viewModel.isRecording {
+            viewModel.stopRecording()
         } else {
-            print("Deteniendo grabación...")
-            // simular texto reconocido
-            inputText = "¿Qué es la roya del café?"
+            viewModel.startRecording()
         }
     }
-    
-    private func getExplanationForIssue(_ issue: String) -> String {
-        switch issue {
-        case "Roya del Café":
-            return """
-            La roya del café es causada por el hongo Hemileia vastatrix. Se caracteriza por manchas amarillo-anaranjadas en las hojas.
-            
-            **Plan de acción recomendado:**
-            
-            1. Podar las ramas más afectadas
-            2. Mejorar la ventilación entre plantas
-            3. Aplicar caldo bordelés (fungicida orgánico)
-            4. Monitorear semanalmente
-            
-            ¿Necesitas más detalles sobre algún paso?
-            """
-        case "Deficiencia de Nitrógeno":
-            return """
-            Las hojas amarillentas indican falta de nitrógeno, esencial para el crecimiento.
-            
-            **Plan de acción recomendado:**
-            
-            1. Aplicar composta rica en nitrógeno
-            2. Usar abono verde (leguminosas)
-            3. Mantener el suelo con buen drenaje
-            4. Revisar el pH del suelo
-            
-            ¿Quieres saber cómo preparar composta?
-            """
-        default:
-            return "¿Qué te gustaría saber específicamente sobre \(issue)?"
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button(action: { dismiss() }) {
+                Image(systemName: "chevron.backward")
+            }
+            .accessibilityLabel(String(localized: "Cerrar conversación"))
+        }
+
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Menu {
+                Toggle(String(localized: "Dictado"), isOn: $viewModel.isSpeechToTextEnabled)
+                    .onChange(of: viewModel.isSpeechToTextEnabled) { _, newValue in viewModel.handleSpeechToTextChange(to: newValue) }
+                Toggle(String(localized: "Lectura en voz alta"), isOn: $viewModel.isTextToSpeechEnabled)
+                    .onChange(of: viewModel.isTextToSpeechEnabled) { _, newValue in viewModel.handleTextToSpeechChange(to: newValue) }
+                Button(String(localized: "Checklist de accesibilidad")) {
+                    showAccessibilityChecklist = true
+                }
+                Button(String(localized: "Reproducir última respuesta")) {
+                    viewModel.speakLastAssistantMessage()
+                }
+                if viewModel.isSending {
+                    Button(String(localized: "Cancelar solicitud")) {
+                        viewModel.cancelPendingRequest()
+                    }
+                }
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+
+            Button {
+                viewModel.markLastAssistantMessageAsKey()
+            } label: {
+                Image(systemName: "bookmark")
+            }
+            .accessibilityLabel(String(localized: "Guardar conversación"))
         }
     }
-    
-    private func generateResponse(for query: String) -> String {
-        // Respuestas simuladas
-        let lowercaseQuery = query.lowercased()
-        
-        if lowercaseQuery.contains("roya") {
-            return "La roya es uno de los problemas más comunes. Se combate mejor con prevención: mantén buena ventilación, poda regularmente y aplica fungicidas orgánicos como el caldo bordelés cada 15 días."
-        } else if lowercaseQuery.contains("fertiliz") || lowercaseQuery.contains("abono") {
-            return "Te recomiendo usar composta orgánica rica en nitrógeno. Puedes prepararla con residuos de café, estiércol y restos vegetales. Aplícala cada 3 meses alrededor de la base de la planta."
-        } else if lowercaseQuery.contains("agua") || lowercaseQuery.contains("riego") {
-            return "El café necesita riego regular pero sin encharcamiento. En época seca, riega 2-3 veces por semana. El suelo debe estar húmedo pero no saturado."
-        } else {
-            return "Esa es una buena pregunta. Basándome en las mejores prácticas agroecológicas para el café, te recomendaría consultar con un técnico especializado o revisar el historial de tus plantas para un diagnóstico más preciso."
-        }
-    }
-}
-    
-// chat message model
-struct ChatMessage: Identifiable {
-    let id = UUID()
-    let text: String
-    let isFromUser: Bool
-    let timestamp = Date()
 }
 
-// chat message view
 struct ChatMessageView: View {
     let message: ChatMessage
-    
+    let retryAction: () -> Void
+
+    init(message: ChatMessage, retryAction: @escaping () -> Void) {
+        self.message = message
+        self.retryAction = retryAction
+    }
+
     var body: some View {
-        HStack {
+        HStack(alignment: .bottom, spacing: 12) {
             if message.isFromUser {
-                Spacer()
-                
+                Spacer(minLength: 40)
             }
-            
-            VStack(alignment: message.isFromUser ? .trailing : .leading, spacing: 5) {
-                Text(message.text)
-                    .padding(12)
-                    .background(message.isFromUser ? Color.green : Color(.systemGray5))
-                    .foregroundStyle(message.isFromUser ? .white : .primary)
-                    .cornerRadius(15)
-                
-                Text(message.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+
+            VStack(alignment: message.isFromUser ? .trailing : .leading, spacing: 6) {
+                bubble
+                metaInfo
             }
-            .frame(maxWidth: 280, alignment: message.isFromUser ? .trailing : .leading)
-            
+            .frame(maxWidth: 320, alignment: message.isFromUser ? .trailing : .leading)
+
             if !message.isFromUser {
-                Spacer()
+                Spacer(minLength: 40)
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(message.isFromUser ? "Tú" : "Copiloto"): \(message.text)")
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if message.isAssistantTyping {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                Text(message.text)
+                    .textSelection(.enabled)
+            }
+
+            if !message.metadata.suggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(message.metadata.suggestions, id: \.self) { suggestion in
+                        Label(suggestion, systemImage: "lightbulb")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if message.isRetryable {
+                Button(String(localized: "Reintentar"), action: retryAction)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(12)
+        .background(message.isFromUser ? Color.green : Color(.systemGray6))
+        .foregroundStyle(message.isFromUser ? Color.white : Color.primary)
+        .cornerRadius(18)
+        .overlay(alignment: .topTrailing) {
+            if message.metadata.isKeyMoment {
+                Image(systemName: "bookmark.fill")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var metaInfo: some View {
+        HStack(spacing: 8) {
+            Text(message.timestamp, style: .time)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if let confidence = message.metadata.confidence {
+                Label(String(format: "%.0f%%", confidence * 100), systemImage: "checkmark.shield")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let source = message.metadata.source {
+                Label(source, systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var accessibilityLabel: String {
+        let speaker = message.isFromUser ? String(localized: "Tú") : String(localized: "Copiloto")
+        return "\(speaker): \(message.text)"
     }
 }
 
+struct AccessibilityChecklistView: View {
+    @Environment(\.dismiss) private var dismiss
+    let checks: [AccessibilityCheck]
+
+    var body: some View {
+        NavigationStack {
+            List(checks) { check in
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: check.status.symbolName)
+                        .foregroundStyle(check.status.tint)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(check.title)
+                            .font(.headline)
+                        Text(check.recommendation)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .navigationTitle(String(localized: "Checklist de accesibilidad"))
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(String(localized: "Cerrar"), action: dismiss.callAsFunction)
+                }
+            }
+        }
+    }
+}
 
 #Preview {
     NavigationStack {
-        ChatView()
+        ChatView(initialContext: "Roya del café")
     }
 }

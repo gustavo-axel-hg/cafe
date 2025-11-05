@@ -24,7 +24,9 @@ class SwiftDataService {
             UserProfile.self,
             AccessibilityConfig.self,
             DiagnosisRecord.self,
-            ActionItem.self
+            ActionItem.self,
+            ChatConversation.self,
+            ChatTurnRecord.self
         ])
         
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
@@ -101,10 +103,65 @@ class SwiftDataService {
         guard let context = modelContext else {
             throw NSError(domain: "SwiftDataService", code: 1, userInfo: [NSLocalizedDescriptionKey: "ModelContext not available"])
         }
-        
+
         user.accessibilitySettings = config
         config.userProfile = user
-        
+
         try context.save()
     }
+
+    // MARK: - Chat logging
+
+    func saveKeyConversation(conversationId: UUID, topic: String?, entries: [ChatTranscriptEntry]) throws {
+        guard let context = modelContext else {
+            throw NSError(domain: "SwiftDataService", code: 1, userInfo: [NSLocalizedDescriptionKey: "ModelContext not available"])
+        }
+
+        let descriptor = FetchDescriptor<ChatConversation>(
+            predicate: #Predicate { $0.conversationId == conversationId }
+        )
+
+        let conversation: ChatConversation
+        if let existing = try context.fetch(descriptor).first {
+            conversation = existing
+        } else {
+            conversation = ChatConversation(conversationId: conversationId, topic: topic ?? "Conversación Copiloto")
+            context.insert(conversation)
+        }
+
+        conversation.topic = topic ?? conversation.topic
+        conversation.lastUpdatedAt = Date()
+
+        // remove stale turns to avoid duplicates
+        for turn in conversation.turns {
+            context.delete(turn)
+        }
+        conversation.turns.removeAll()
+
+        for entry in entries {
+            let turn = ChatTurnRecord(role: entry.role, text: entry.text, timestamp: entry.timestamp, isKeyMoment: entry.isKeyMoment)
+            turn.conversation = conversation
+            conversation.turns.append(turn)
+        }
+
+        try context.save()
+    }
+
+    func fetchKeyConversations(limit: Int = 10) throws -> [ChatConversation] {
+        guard let context = modelContext else { return [] }
+
+        let descriptor = FetchDescriptor<ChatConversation>(
+            sortBy: [SortDescriptor(\.lastUpdatedAt, order: .reverse)],
+            fetchLimit: limit
+        )
+
+        return try context.fetch(descriptor)
+    }
+}
+
+struct ChatTranscriptEntry {
+    let role: String
+    let text: String
+    let timestamp: Date
+    let isKeyMoment: Bool
 }
